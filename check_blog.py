@@ -4,20 +4,28 @@ import os
 import re
 import sys
 import urllib.parse
+import urllib.error
 import urllib.request
 import xml.etree.ElementTree as ET
 
 BLOG_ID = os.environ.get("BLOG_ID", "ranto28")
 RSS_URL = f"https://rss.blog.naver.com/{BLOG_ID}.xml"
 STATE_FILE = "last_seen.json"
-TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
-CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
+TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
 
 
 def fetch_posts():
     req = urllib.request.Request(RSS_URL, headers={"User-Agent": "Mozilla/5.0"})
-    with urllib.request.urlopen(req, timeout=30) as r:
-        root = ET.fromstring(r.read())
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            raw = r.read()
+    except urllib.error.HTTPError as e:
+        raise RuntimeError(f"[RSS 읽기 실패] HTTP {e.code}: {RSS_URL}") from None
+    try:
+        root = ET.fromstring(raw)
+    except ET.ParseError:
+        raise RuntimeError(f"[RSS 해석 실패] 응답 앞부분: {raw[:200]!r}") from None
     posts = []
     for item in root.iter("item"):
         link = (item.findtext("link") or "").strip()
@@ -36,12 +44,20 @@ def fetch_posts():
 
 def send(text):
     data = urllib.parse.urlencode({"chat_id": CHAT_ID, "text": text}).encode()
-    urllib.request.urlopen(
-        f"https://api.telegram.org/bot{TOKEN}/sendMessage", data=data, timeout=30
-    ).read()
+    try:
+        urllib.request.urlopen(
+            f"https://api.telegram.org/bot{TOKEN}/sendMessage", data=data, timeout=30
+        ).read()
+    except urllib.error.HTTPError as e:
+        body = e.read().decode(errors="replace")
+        raise RuntimeError(f"[텔레그램 전송 실패] HTTP {e.code}: {body}") from None
 
 
 def main():
+    if not TOKEN:
+        raise RuntimeError("[설정 오류] Secrets에 TELEGRAM_BOT_TOKEN이 없습니다 (이름 철자 확인).")
+    if not CHAT_ID:
+        raise RuntimeError("[설정 오류] Secrets에 TELEGRAM_CHAT_ID가 없습니다 (이름 철자 확인).")
     posts = fetch_posts()
     if not posts:
         print("RSS에서 글을 찾지 못했습니다.")
@@ -74,5 +90,6 @@ if __name__ == "__main__":
     try:
         main()
     except Exception as e:
+        print(f"::error::{e}")
         print(f"오류: {e}", file=sys.stderr)
         sys.exit(1)
